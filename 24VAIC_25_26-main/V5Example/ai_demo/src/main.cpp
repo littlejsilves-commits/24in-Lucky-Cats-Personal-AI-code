@@ -3,7 +3,15 @@
 /*    Module:       main.cpp                                                  */
 /*    Author:       Lucky cATS                                                */
 /*    Created:      05/24/2026                                                */
-/*    Description:  V5 project                                                */
+/*    Description:  V5 project with GPS positioning                           */
+/*                                                                            */
+/*    📋 QUICK START GUIDE:                                                   */
+/*       All configurable parameters are in the section below (lines 16-100)  */
+/*       Key settings to adjust:                                              */
+/*         - DRIVE_SPEED_PCT: Robot speed (10 = testing, 75 = competition)   */
+/*         - TARGET_CLASSID: Which ball to chase (BALL_BLUE_ID or BALL_RED_ID)*/
+/*         - GOAL_LOADER_X/Y & GOAL_LONG_X/Y: Goal positions on your field   */
+/*         - GPS_OFFSET_MM: Distance from GPS sensor to robot center          */
 /*                                                                            */
 /*----------------------------------------------------------------------------*/
 
@@ -12,6 +20,93 @@
 #include <cmath>
 
 using namespace vex;
+
+/*============================================================================*/
+/*                      CONFIGURABLE PARAMETERS                               */
+/*         🔧 Adjust these values to tune robot behavior 🔧                   */
+/*============================================================================*/
+
+// ===== HARDWARE CONFIGURATION =====
+#define GPS_OFFSET_MM -150.0  // GPS sensor offset from robot center (negative = behind center)
+#define MANAGER_ROBOT 1       // 1 = Manager robot, 0 = Worker robot
+
+// ===== TARGET SELECTION =====
+// Class IDs from Jetson model (must match src/lib/types.ts):
+//   0 = BallBlue, 1 = BallBlueInGoal, 2 = BallRed, 3 = BallRedInGoal
+#define BALL_BLUE_ID          0
+#define BALL_BLUE_IN_GOAL_ID  1
+#define BALL_RED_ID           2
+#define BALL_RED_IN_GOAL_ID   3
+
+int TARGET_CLASSID         = BALL_BLUE_ID;  // Which ball to chase (or -1 for any)
+int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goal
+
+// ===== SPEED SETTINGS =====
+// *** TESTING: set to 10. Change to 75 (or higher) for competition. ***
+#define DRIVE_SPEED_PCT      10.0  // Master speed control (all other speeds derive from this)
+
+// Derived speeds (automatically calculated - don't edit directly)
+#define BASE_DRIVE_SPEED    (DRIVE_SPEED_PCT)        // Normal driving speed
+#define NEAR_DRIVE_SPEED    (DRIVE_SPEED_PCT * 0.80) // Within 1m of target (80%)
+#define COLLECT_DRIVE_SPEED (DRIVE_SPEED_PCT * 0.80) // Driving through block (80%)
+#define SEARCH_SPIN_SPEED   (DRIVE_SPEED_PCT * 0.80) // Rotating to search (80%)
+#define GOAL_APPROACH_SPEED (DRIVE_SPEED_PCT)        // Driving to goal
+
+// ===== CAMERA & DETECTION SETTINGS =====
+#define CAMERA_MIN_DIST       0.10  // meters - camera loses target below this distance
+#define BLIND_APPROACH_DIST   0.20  // meters - distance to drive blind to reach target
+#define BLIND_APPROACH_SPEED_MPS  0.40  // m/s - robot speed at COLLECT_DRIVE_SPEED (measure & adjust)
+
+// Detection confirmation (prevents false positives)
+#define CONFIRM_WINDOW      10     // Frame window size for confirmation
+#define LOSE_THRESHOLD       5     // Consecutive misses before dropping target
+#define ACQUIRE_DELAY_MS    500    // Hold still when first detecting target (ms)
+
+// Per-class confirmation thresholds (out of CONFIRM_WINDOW frames)
+// Lower = faster reaction, Higher = more stable
+int confirmThresholdForClass(int classID) {
+    switch (classID) {
+        case BALL_BLUE_ID:         return 6;  // BallBlue
+        case BALL_BLUE_IN_GOAL_ID: return 8;  // BallBlueInGoal (rarely chased)
+        case BALL_RED_ID:          return 6;  // BallRed
+        case BALL_RED_IN_GOAL_ID:  return 8;  // BallRedInGoal (rarely chased)
+        default:                   return 4;  // Unknown/any target
+    }
+}
+
+// ===== OBSTACLE AVOIDANCE SETTINGS =====
+#define OBSTACLE_AVOID_DIST  0.2   // meters - start avoiding obstacles at this distance
+#define OBSTACLE_AVOID_GAIN  80.0  // Steering strength (higher = sharper avoidance)
+
+// ===== COLLECTION TIMING =====
+double COLLECTION_TIME     = 5.0;  // seconds - how long to run intake after reaching block
+
+// ===== FIELD DIMENSIONS (GPS-based navigation) =====
+// VEX AI Competition field is 244cm × 244cm
+#define FIELD_MIN_X  -122.0  // cm - Left boundary
+#define FIELD_MAX_X   122.0  // cm - Right boundary
+#define FIELD_MIN_Y  -122.0  // cm - Bottom boundary
+#define FIELD_MAX_Y   122.0  // cm - Top boundary
+#define FIELD_BOUNDARY_BUFFER 15.0  // cm - Safety margin from edges
+
+// ===== GOAL POSITIONS (GPS coordinates) =====
+// Measure these on your field and update!
+#define GOAL_LOADER_X   110.0   // cm - Loader goal X position
+#define GOAL_LOADER_Y   110.0   // cm - Loader goal Y position
+#define GOAL_LONG_X    -110.0   // cm - Long goal X position
+#define GOAL_LONG_Y     110.0   // cm - Long goal Y position
+
+// ===== GPS POSITIONING SETTINGS =====
+#define GPS_OBSTACLE_AVOID_DIST  30.0  // cm - avoid boundaries at this distance
+#define GPS_POSITION_TOLERANCE    5.0  // cm - acceptable positioning error
+
+// ===== GOAL DETECTION (DISABLED - model not trained yet) =====
+#define GOALS_ENABLED       0  // Set to 1 when goal detection model is ready
+
+/*============================================================================*/
+/*                    END OF CONFIGURABLE PARAMETERS                          */
+/*         Hardware declarations and code logic below this line              */
+/*============================================================================*/
 
 brain Brain;
 controller Controller;
@@ -33,9 +128,7 @@ motor Intake = motor(PORT1, ratio18_1, true);
 motor Outake = motor(PORT2, ratio18_1, false);
 motor Loader = motor(PORT3, ratio18_1, false);
 
-// GPS + Drivetrain (GPS at back of robot, offset from center)
-// GPS offset: distance from GPS to robot center (negative = behind center)
-#define GPS_OFFSET_MM -150.0  // GPS is 150mm behind robot center
+// GPS + Drivetrain (GPS at back of robot)
 gps GPS = gps(PORT22, 0, GPS_OFFSET_MM, distanceUnits::mm, 0);
 smartdrive Drivetrain = smartdrive(leftDrive, rightDrive, GPS, 319.19, 320, 40, mm, 1);
 
@@ -43,9 +136,7 @@ smartdrive Drivetrain = smartdrive(leftDrive, rightDrive, GPS, 319.19, 320, 40, 
 competition Competition;
 ai::jetson jetson_comms;
 
-// Robot link on PORT20 (PORT15 is used by leftDrive3)
-#define MANAGER_ROBOT 1
-
+// Robot link configuration
 #if defined(MANAGER_ROBOT)
 #pragma message("building for the manager")
 ai::robot_link link(PORT20, "robot_32456_1", linkType::manager);
@@ -53,91 +144,6 @@ ai::robot_link link(PORT20, "robot_32456_1", linkType::manager);
 #pragma message("building for the worker")
 ai::robot_link link(PORT10, "robot_32456_1", linkType::worker);
 #endif
-
-// ===== TARGET CONFIGURATION =====
-// Class IDs from the Jetson model (must match src/lib/types.ts on the Jetson):
-//   0 = BallBlue
-//   1 = BallBlueInGoal
-//   2 = BallRed
-//   3 = BallRedInGoal
-#define BALL_BLUE_ID          0
-#define BALL_BLUE_IN_GOAL_ID  1
-#define BALL_RED_ID           2
-#define BALL_RED_IN_GOAL_ID   3
-
-// Set which ball the robot should chase.
-// Use BALL_BLUE_ID or BALL_RED_ID. Set to -1 to chase any ball.
-int TARGET_CLASSID         = BALL_BLUE_ID;
-
-int BLOCKS_TO_COLLECT      = 3;
-// How long to run the intake after the blind approach completes (seconds)
-double COLLECTION_TIME     = 3.0;
-
-// Goal class IDs — NOT YET TRAINED. Goal detection is disabled until model is updated.
-// When goal model is ready, set GOALS_ENABLED to 1, add TARGET_GOAL and goal classID
-// defines here, and assign correct IDs from src/lib/types.ts on the Jetson.
-#define GOALS_ENABLED       0
-
-// ===== SPEED CONFIGURATION =====
-// *** TESTING: set to 10. Change to 75 (or higher) for competition. ***
-#define DRIVE_SPEED_PCT      10.0
-
-// Derived speeds — do not edit these directly, adjust DRIVE_SPEED_PCT above.
-#define BASE_DRIVE_SPEED    (DRIVE_SPEED_PCT)            // Normal driving speed
-#define NEAR_DRIVE_SPEED    (DRIVE_SPEED_PCT * 0.80)     // Within 1m of target (80%)
-#define COLLECT_DRIVE_SPEED (DRIVE_SPEED_PCT * 0.80)     // Driving through block
-#define SEARCH_SPIN_SPEED   (DRIVE_SPEED_PCT * 0.80)     // Rotating to search
-#define GOAL_APPROACH_SPEED (DRIVE_SPEED_PCT)            // Driving to goal
-
-// ===== BLIND APPROACH CONFIGURATION =====
-// Below CAMERA_MIN_DIST the camera can no longer reliably detect the target.
-// The robot locks in its last known heading and drives straight for
-// BLIND_APPROACH_DIST at COLLECT_DRIVE_SPEED, ignoring detections.
-// Time to cover the blind distance is calculated from speed and BLIND_APPROACH_SPEED_MPS.
-//
-#define CAMERA_MIN_DIST       0.10  // meters — reliable detection threshold
-#define BLIND_APPROACH_DIST   0.20  // meters — distance to drive blind to reach target
-// Approximate robot speed at COLLECT_DRIVE_SPEED (10%) in metres/second.
-// Measure this on your robot and adjust: run at 10% for 1 second, measure distance.
-#define BLIND_APPROACH_SPEED_MPS  0.40  // metres/second at COLLECT_DRIVE_SPEED
-#define OBSTACLE_AVOID_DIST  0.2   // Start avoiding at 60cm
-#define OBSTACLE_AVOID_GAIN  80.0  // How hard to steer away (higher = sharper avoidance)
-
-// ===== GPS-BASED POSITIONING CONFIGURATION =====
-// Field dimensions (VEX AI Competition field is 244cm x 244cm)
-#define FIELD_MIN_X  -122.0  // cm
-#define FIELD_MAX_X   122.0  // cm
-#define FIELD_MIN_Y  -122.0  // cm
-#define FIELD_MAX_Y   122.0  // cm
-#define FIELD_BOUNDARY_BUFFER 15.0  // cm - stay this far from field edges
-
-// Goal positions (cm) - adjust these to match your field setup
-// Assuming goals are near field corners/edges
-#define GOAL_LOADER_X   110.0   // Loader goal X position
-#define GOAL_LOADER_Y   110.0   // Loader goal Y position
-#define GOAL_LONG_X    -110.0   // Long goal X position
-#define GOAL_LONG_Y     110.0   // Long goal Y position
-
-// GPS-based obstacle avoidance
-#define GPS_OBSTACLE_AVOID_DIST  30.0  // cm - avoid field boundaries and known obstacles
-#define GPS_POSITION_TOLERANCE    5.0  // cm - acceptable position error
-
-// ===== DETECTION CONFIRMATION WINDOW =====
-// The robot requires a target to appear in at least CONFIRM_THRESHOLD out of the
-// last CONFIRM_WINDOW frames before it starts moving toward it.
-// Once confirmed, it stops tracking only after LOSE_THRESHOLD consecutive misses.
-// Tune CONFIRM_THRESHOLD per object type using confirmThresholdForClass().
-//
-#define CONFIRM_WINDOW      10     // Sliding window size (frames)
-#define LOSE_THRESHOLD       5     // Consecutive misses before dropping a confirmed target
-
-// Per-class confirmation thresholds (out of CONFIRM_WINDOW frames).
-// Lower = reacts faster but less stable. Higher = more stable but slower to acquire.
-int confirmThresholdForClass(int classID) {
-    switch (classID) {
-        case BALL_BLUE_ID:         return 6;   // BallBlue
-        case BALL_BLUE_IN_GOAL_ID: return 8;   // BallBlueInGoal — high threshold, rarely a chase target
-        case BALL_RED_ID:          return 6;   // BallRed
         case BALL_RED_IN_GOAL_ID:  return 8;   // BallRedInGoal — rarely a chase target
         default:                   return 4;   // Any / unknown
     }
@@ -216,9 +222,7 @@ uint32_t blindApproachStartTime = 0;
 uint32_t blindApproachDuration  = 0;   // ms — computed when blind approach starts
 double   blindApproachSteer     = 0.0; // locked heading steer value
 
-// Acquire delay — when a target is first spotted, hold still for this long
-// before acting, giving the confidence window time to fill up.
-#define ACQUIRE_DELAY_MS    500
+// Acquire delay state
 uint32_t firstDetectTime    = 0;   // timestamp of first detection in current acquire cycle
 bool     acquireDelayActive = false;
 
