@@ -217,14 +217,12 @@ bool collectBlock(int blockClassID) {
     if (findAndDriveToObject(blockClassID, BLOCK_COLLECTION_DISTANCE, BLOCK_SEARCH_TIMEOUT)) {
         // Start intake
         Intake.spin(forward);
-        Belt.spin(forward);
         
         // Collect for specified time
         wait(COLLECTION_TIME, seconds);
         
         // Stop intake
         Intake.stop();
-        Belt.stop();
         
         skillsBlocksCollected++;
         
@@ -260,33 +258,27 @@ bool scoreAtGoal(int goalClassID) {
             Brain.Screen.print("TALL GOAL MODE");
         }
         
-        // Activate lever at 50% power
-        Lever1.setVelocity(50, percent);
-        Lever2.setVelocity(50, percent);
-        Lever1.spin(reverse);  // PORT11 reverse
-        Lever2.spin(forward);  // PORT12 forward
+        // Use Loader motor at 50% power for scoring
+        Loader.setVelocity(50, percent);
+        Loader.spin(forward);
         
         // Run intake in reverse to score
         Intake.spin(reverse);
-        Belt.spin(reverse);
         
         // Score for 5 seconds
         wait(5, seconds);
         
         // Stop intake
         Intake.stop();
-        Belt.stop();
         
-        // Reverse lever to return
-        Lever1.spin(forward);
-        Lever2.spin(reverse);
+        // Reverse loader to return
+        Loader.spin(reverse);
         
-        // Wait for lever to return
-        wait(5, seconds);
+        // Wait for loader to return
+        wait(2, seconds);
         
-        // Stop lever
-        Lever1.stop();
-        Lever2.stop();
+        // Stop loader
+        Loader.stop();
         
         // Retract tall goal piston after scoring
         if (isTallGoal) {
@@ -386,9 +378,8 @@ void skillsAutonomous() {
     leftDrive.stop(brake);
     rightDrive.stop(brake);
     Intake.stop();
-    Belt.stop();
-    Lever1.stop();
-    Lever2.stop();
+    Outake.stop();
+    Loader.stop();
     
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);

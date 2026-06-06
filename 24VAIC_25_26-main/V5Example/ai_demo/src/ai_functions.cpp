@@ -157,19 +157,17 @@ void goToObject(OBJECT type){
 
 void runIntake(vex::directionType dir) {
     Intake.spin(dir);
-    Belt.spin(dir);
+    // Belt motor not present in current robot configuration
 }
 
 void runIntake(vex::directionType dir, int rotations, bool driveForward = false) {
-    Intake.spinFor(dir, rotations, vex::rotationUnits::rev, false);
-    Belt.spinFor(dir, rotations, vex::rotationUnits::rev, !driveForward);
+    Intake.spinFor(dir, rotations, vex::rotationUnits::rev, !driveForward);
     if (driveForward)
         Drivetrain.driveFor(70, vex::distanceUnits::cm, 40, velocityUnits::pct);
 }
 
 void stopIntake() {
     Intake.stop();
-    Belt.stop();
 }
 
 void goToGoal() {

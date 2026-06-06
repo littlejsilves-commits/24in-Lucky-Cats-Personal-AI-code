@@ -7,10 +7,8 @@ extern motor_group rightDrive;
 extern gps GPS;
 extern smartdrive Drivetrain;
 extern motor Intake;
-extern motor Belt;
-extern motor Lever1;
-extern motor Lever2;
-extern motor_group Lever;
+extern motor Outake;
+extern motor Loader;
 extern controller Controller;
 
 /**
