@@ -620,7 +620,15 @@ int main() {
 
         // --- UPDATE CONFIDENCE TRACKER ---
         // confirmed = true only once the target appears in enough recent frames
+        bool wasConfirmed = targetTracker.confirmed;  // Track previous state
         bool confirmed = targetTracker.update(rawFound, TARGET_CLASSID);
+        
+        // Start intake immediately when target is first confirmed (decisive lock)
+        if (confirmed && !wasConfirmed && !collectingBlock) {
+            Intake.spin(forward);
+            Brain.Screen.setCursor(4, 1);
+            Brain.Screen.print("INTAKE ON - LOCKED!");
+        }
         
         // Update locked target position when confirmed
         if (confirmed && rawFound && targetIndex != -1) {
@@ -631,6 +639,9 @@ int main() {
             }
         } else if (!confirmed) {
             targetLockTime = 0;  // Reset lock when lost
+            if (!collectingBlock) {
+                Intake.stop();  // Stop intake if not collecting and lost target
+            }
         }
 
         // Use the last known good position if confirmed but momentarily missing this frame
@@ -672,11 +683,11 @@ int main() {
                     applyDrive(COLLECT_DRIVE_SPEED, targetSteer, avoidSteer);
                 }
             } else if (dist <= 0.15) {
-                // Close enough - start collecting
+                // Close enough - start collection timer (intake already running)
                 collectingBlock     = true;
                 collectionStartTime = Brain.Timer.system();
-                Intake.spin(forward);
                 Brain.Screen.setCursor(3, 1);
+                Brain.Screen.print("COLLECTING!");
                 Brain.Screen.print("COLLECTING!");
             } else {
                 // Normal tracking — drive toward target with obstacle avoidance
