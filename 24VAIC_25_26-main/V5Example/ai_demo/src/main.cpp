@@ -54,21 +54,27 @@ int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goa
 
 // ===== CAMERA & DETECTION SETTINGS =====
 // Detection confirmation (prevents false positives)
-#define CONFIRM_WINDOW      10     // Frame window size for confirmation
-#define LOSE_THRESHOLD       5     // Consecutive misses before dropping target
-#define ACQUIRE_DELAY_MS    500    // Hold still when first detecting target (ms)
+#define CONFIRM_WINDOW      8      // Frame window size (smaller = faster)
+#define LOSE_THRESHOLD      10     // Consecutive misses before dropping target (higher = more sticky)
+#define ACQUIRE_DELAY_MS    0      // No delay - start tracking immediately
 
 // Per-class confirmation thresholds (out of CONFIRM_WINDOW frames)
 // Lower = faster reaction, Higher = more stable
 int confirmThresholdForClass(int classID) {
     switch (classID) {
-        case BALL_BLUE_ID:         return 6;  // BallBlue
-        case BALL_BLUE_IN_GOAL_ID: return 8;  // BallBlueInGoal (rarely chased)
-        case BALL_RED_ID:          return 6;  // BallRed
-        case BALL_RED_IN_GOAL_ID:  return 8;  // BallRedInGoal (rarely chased)
-        default:                   return 4;  // Unknown/any target
+        case BALL_BLUE_ID:         return 3;  // BallBlue - need 3/8 frames (37.5%)
+        case BALL_BLUE_IN_GOAL_ID: return 5;  // BallBlueInGoal (rarely chased)
+        case BALL_RED_ID:          return 3;  // BallRed - need 3/8 frames (37.5%)
+        case BALL_RED_IN_GOAL_ID:  return 5;  // BallRedInGoal (rarely chased)
+        default:                   return 3;  // Unknown/any target
     }
 }
+
+// Target persistence - once locked, stick with it
+#define TARGET_LOCK_DISTANCE  0.5  // meters - max distance change to consider same target
+uint32_t targetLockTime = 0;       // When current target was locked
+double   lastTargetX = 0.0;        // Last confirmed target position
+double   lastTargetY = 0.0;
 
 // ===== OBSTACLE AVOIDANCE SETTINGS =====
 #define OBSTACLE_AVOID_DIST  0.2   // meters - start avoiding obstacles at this distance
@@ -207,8 +213,6 @@ ConfidenceTracker targetTracker;
 int      blocksCollected     = 0;
 bool     collectingBlock     = false;
 uint32_t collectionStartTime = 0;
-uint32_t firstDetectTime    = 0;
-bool     acquireDelayActive = false;
 
 // Helper: Display robot status on brain screen
 void displayStatus(const char* mode, double dist = 0, double gpsX = 0, double gpsY = 0, double heading = 0) {
@@ -571,10 +575,12 @@ int main() {
         link.set_remote_location(local_map.pos.x, local_map.pos.y,
                                  local_map.pos.az, local_map.pos.status);
 
-        // --- FIND CLOSEST RAW DETECTION THIS FRAME ---
+        // --- FIND BEST TARGET (prefer locked target, then closest) ---
         bool   rawFound    = false;
         double closestDist = 999999.0;
+        double lockedDist  = 999999.0;
         int    targetIndex = -1;
+        int    lockedIndex = -1;
 
         for (int i = 0; i < local_map.detectionCount; i++) {
             bool isTarget = (TARGET_CLASSID == -1) ||
@@ -583,13 +589,49 @@ int main() {
                 double x = local_map.detections[i].mapLocation.x;
                 double y = local_map.detections[i].mapLocation.y;
                 double d = sqrt(x * x + y * y);
-                if (d < closestDist) { closestDist = d; targetIndex = i; rawFound = true; }
+                
+                // Check if this is near our last locked target
+                if (targetTracker.confirmed) {
+                    double dx = x - lastTargetX;
+                    double dy = y - lastTargetY;
+                    double distFromLocked = sqrt(dx * dx + dy * dy);
+                    if (distFromLocked < TARGET_LOCK_DISTANCE && d < lockedDist) {
+                        lockedDist = d;
+                        lockedIndex = i;
+                    }
+                }
+                
+                // Also track closest
+                if (d < closestDist) { 
+                    closestDist = d; 
+                    targetIndex = i; 
+                }
             }
+        }
+        
+        // Prefer locked target over closest
+        if (lockedIndex != -1) {
+            targetIndex = lockedIndex;
+            closestDist = lockedDist;
+            rawFound = true;
+        } else if (targetIndex != -1) {
+            rawFound = true;
         }
 
         // --- UPDATE CONFIDENCE TRACKER ---
         // confirmed = true only once the target appears in enough recent frames
         bool confirmed = targetTracker.update(rawFound, TARGET_CLASSID);
+        
+        // Update locked target position when confirmed
+        if (confirmed && rawFound && targetIndex != -1) {
+            lastTargetX = local_map.detections[targetIndex].mapLocation.x;
+            lastTargetY = local_map.detections[targetIndex].mapLocation.y;
+            if (targetLockTime == 0) {
+                targetLockTime = Brain.Timer.system();
+            }
+        } else if (!confirmed) {
+            targetLockTime = 0;  // Reset lock when lost
+        }
 
         // Use the last known good position if confirmed but momentarily missing this frame
         double tx = 0.0, ty = 0.0, dist = 0.0;
@@ -619,11 +661,11 @@ int main() {
                 // Collecting - wait for collection time to complete
                 if ((Brain.Timer.system() - collectionStartTime) >=
                         (uint32_t)(COLLECTION_TIME * 1000)) {
-                    collectingBlock    = false;
-                    acquireDelayActive = false;  // reset for next target
-                    firstDetectTime    = 0;
+                    collectingBlock = false;
                     blocksCollected++;
                     Intake.stop();
+                    targetTracker.reset();  // Reset for next target
+                    targetLockTime = 0;
                 } else {
                     double angle       = atan2(tx, ty) * (180.0 / M_PI);
                     double targetSteer = angle * 0.85;
@@ -654,13 +696,8 @@ int main() {
         } else {
             // Not confirmed — acquiring or lost
             if (!collectingBlock) {
-                int threshold = confirmThresholdForClass(TARGET_CLASSID);
-
                 if (!rawFound) {
                     // No detection - rotate to scan
-                    acquireDelayActive = false;
-                    firstDetectTime    = 0;
-
                     uint32_t now = Brain.Timer.system();
                     bool rotateRight = ((now / 3000) % 2) == 0;
 
@@ -674,23 +711,16 @@ int main() {
                     double heading = GPS.heading(degrees);
                     displayStatus("SCAN", 0, robotX, robotY, heading);
                 } else {
-                    // Target detected - acquiring
-                    if (!acquireDelayActive) {
-                        acquireDelayActive = true;
-                        firstDetectTime    = Brain.Timer.system();
-                    }
-
-                    leftDrive.stop(brake);
-                    rightDrive.stop(brake);
+                    // Target detected - acquiring, no delay, just start tracking
                     displayStatus("ACQUIRE", dist);
                 }
             } else if ((Brain.Timer.system() - collectionStartTime) >=
                            (uint32_t)(COLLECTION_TIME * 1000)) {
-                collectingBlock    = false;
-                acquireDelayActive = false;  // reset for next target
-                firstDetectTime    = 0;
+                collectingBlock = false;
                 blocksCollected++;
                 Intake.stop();
+                targetTracker.reset();  // Reset for next target
+                targetLockTime = 0;
             }
         }
 
