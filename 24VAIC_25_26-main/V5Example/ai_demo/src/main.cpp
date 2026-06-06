@@ -33,8 +33,10 @@ motor Intake = motor(PORT1, ratio18_1, true);
 motor Outake = motor(PORT2, ratio18_1, false);
 motor Loader = motor(PORT3, ratio18_1, false);
 
-// Dummy GPS + Drivetrain (required by ai_functions.cpp — GPS not used for navigation)
-gps GPS = gps(PORT22, 0, 0, distanceUnits::mm, 0);
+// GPS + Drivetrain (GPS at back of robot, offset from center)
+// GPS offset: distance from GPS to robot center (negative = behind center)
+#define GPS_OFFSET_MM -150.0  // GPS is 150mm behind robot center
+gps GPS = gps(PORT22, 0, GPS_OFFSET_MM, distanceUnits::mm, 0);
 smartdrive Drivetrain = smartdrive(leftDrive, rightDrive, GPS, 319.19, 320, 40, mm, 1);
 
 // Competition and comms
@@ -93,13 +95,32 @@ double COLLECTION_TIME     = 3.0;
 // BLIND_APPROACH_DIST at COLLECT_DRIVE_SPEED, ignoring detections.
 // Time to cover the blind distance is calculated from speed and BLIND_APPROACH_SPEED_MPS.
 //
-#define CAMERA_MIN_DIST       0.25  // meters — reliable detection threshold
-#define BLIND_APPROACH_DIST   0.30  // meters — distance to drive blind to reach target
+#define CAMERA_MIN_DIST       0.10  // meters — reliable detection threshold
+#define BLIND_APPROACH_DIST   0.20  // meters — distance to drive blind to reach target
 // Approximate robot speed at COLLECT_DRIVE_SPEED (10%) in metres/second.
 // Measure this on your robot and adjust: run at 10% for 1 second, measure distance.
-#define BLIND_APPROACH_SPEED_MPS  0.15  // metres/second at COLLECT_DRIVE_SPEED
-#define OBSTACLE_AVOID_DIST  0.6   // Start avoiding at 60cm
+#define BLIND_APPROACH_SPEED_MPS  0.40  // metres/second at COLLECT_DRIVE_SPEED
+#define OBSTACLE_AVOID_DIST  0.2   // Start avoiding at 60cm
 #define OBSTACLE_AVOID_GAIN  80.0  // How hard to steer away (higher = sharper avoidance)
+
+// ===== GPS-BASED POSITIONING CONFIGURATION =====
+// Field dimensions (VEX AI Competition field is 244cm x 244cm)
+#define FIELD_MIN_X  -122.0  // cm
+#define FIELD_MAX_X   122.0  // cm
+#define FIELD_MIN_Y  -122.0  // cm
+#define FIELD_MAX_Y   122.0  // cm
+#define FIELD_BOUNDARY_BUFFER 15.0  // cm - stay this far from field edges
+
+// Goal positions (cm) - adjust these to match your field setup
+// Assuming goals are near field corners/edges
+#define GOAL_LOADER_X   110.0   // Loader goal X position
+#define GOAL_LOADER_Y   110.0   // Loader goal Y position
+#define GOAL_LONG_X    -110.0   // Long goal X position
+#define GOAL_LONG_Y     110.0   // Long goal Y position
+
+// GPS-based obstacle avoidance
+#define GPS_OBSTACLE_AVOID_DIST  30.0  // cm - avoid field boundaries and known obstacles
+#define GPS_POSITION_TOLERANCE    5.0  // cm - acceptable position error
 
 // ===== DETECTION CONFIRMATION WINDOW =====
 // The robot requires a target to appear in at least CONFIRM_THRESHOLD out of the
@@ -202,6 +223,100 @@ uint32_t firstDetectTime    = 0;   // timestamp of first detection in current ac
 bool     acquireDelayActive = false;
 
 /*---------------------------------------------------------------------------*/
+/*  GPS Helper Functions                                                     */
+/*---------------------------------------------------------------------------*/
+// Get robot's front position (accounting for GPS at back)
+void getRobotFrontPosition(double &frontX, double &frontY) {
+    double robotX = GPS.xPosition(distanceUnits::cm);
+    double robotY = GPS.yPosition(distanceUnits::cm);
+    double heading = GPS.heading(degrees);
+    
+    // GPS is at back, calculate front position
+    // GPS_OFFSET_MM is negative, so we add it in the heading direction
+    double offsetCm = GPS_OFFSET_MM / 10.0;  // Convert mm to cm
+    frontX = robotX - offsetCm * sin(heading * M_PI / 180.0);
+    frontY = robotY - offsetCm * cos(heading * M_PI / 180.0);
+}
+
+// Check if a position is safe (within field boundaries)
+bool isPositionSafe(double x, double y) {
+    return (x > FIELD_MIN_X + FIELD_BOUNDARY_BUFFER &&
+            x < FIELD_MAX_X - FIELD_BOUNDARY_BUFFER &&
+            y > FIELD_MIN_Y + FIELD_BOUNDARY_BUFFER &&
+            y < FIELD_MAX_Y - FIELD_BOUNDARY_BUFFER);
+}
+
+// GPS-based field boundary avoidance - returns steering correction
+double gpsFieldBoundaryAvoidance() {
+    double frontX, frontY;
+    getRobotFrontPosition(frontX, frontY);
+    double heading = GPS.heading(degrees);
+    double steerCorrection = 0.0;
+    
+    // Check proximity to each boundary and apply repulsion
+    // Left boundary
+    if (frontX < FIELD_MIN_X + GPS_OBSTACLE_AVOID_DIST) {
+        double penetration = (FIELD_MIN_X + GPS_OBSTACLE_AVOID_DIST - frontX);
+        double repulsion = (penetration / GPS_OBSTACLE_AVOID_DIST) * 30.0;
+        // If heading left (180-360), push right
+        if (heading > 180) steerCorrection += repulsion;
+    }
+    
+    // Right boundary
+    if (frontX > FIELD_MAX_X - GPS_OBSTACLE_AVOID_DIST) {
+        double penetration = (frontX - (FIELD_MAX_X - GPS_OBSTACLE_AVOID_DIST));
+        double repulsion = (penetration / GPS_OBSTACLE_AVOID_DIST) * 30.0;
+        // If heading right (0-180), push left
+        if (heading < 180) steerCorrection -= repulsion;
+    }
+    
+    // Bottom boundary
+    if (frontY < FIELD_MIN_Y + GPS_OBSTACLE_AVOID_DIST) {
+        double penetration = (FIELD_MIN_Y + GPS_OBSTACLE_AVOID_DIST - frontY);
+        double repulsion = (penetration / GPS_OBSTACLE_AVOID_DIST) * 30.0;
+        // If heading down (90-270), push away
+        double angleFromDown = fabs(heading - 180.0);
+        if (angleFromDown < 90) steerCorrection += repulsion * (heading > 180 ? 1 : -1);
+    }
+    
+    // Top boundary
+    if (frontY > FIELD_MAX_Y - GPS_OBSTACLE_AVOID_DIST) {
+        double penetration = (frontY - (FIELD_MAX_Y - GPS_OBSTACLE_AVOID_DIST));
+        double repulsion = (penetration / GPS_OBSTACLE_AVOID_DIST) * 30.0;
+        // If heading up (270-360 or 0-90), push away
+        double angleFromUp = fabs(heading);
+        if (angleFromUp < 90 || angleFromUp > 270) {
+            steerCorrection += repulsion * (heading < 90 || heading > 270 ? -1 : 1);
+        }
+    }
+    
+    if (steerCorrection >  40.0) steerCorrection =  40.0;
+    if (steerCorrection < -40.0) steerCorrection = -40.0;
+    return steerCorrection;
+}
+
+// Calculate distance from current position to a target position
+double gpsDistanceTo(double targetX, double targetY) {
+    double robotX = GPS.xPosition(distanceUnits::cm);
+    double robotY = GPS.yPosition(distanceUnits::cm);
+    return sqrt((targetX - robotX) * (targetX - robotX) + 
+                (targetY - robotY) * (targetY - robotY));
+}
+
+// Calculate angle to turn to face a target position
+double gpsAngleTo(double targetX, double targetY) {
+    double robotX = GPS.xPosition(distanceUnits::cm);
+    double robotY = GPS.yPosition(distanceUnits::cm);
+    double dx = targetX - robotX;
+    double dy = targetY - robotY;
+    
+    // atan2 gives angle from north (0 degrees = north, 90 = east)
+    double angle = atan2(dx, dy) * (180.0 / M_PI);
+    if (angle < 0) angle += 360.0;
+    return angle;
+}
+
+/*---------------------------------------------------------------------------*/
 /*  Obstacle avoidance helper                                                */
 /*---------------------------------------------------------------------------*/
 double obstacleSteeringCorrection(const AI_RECORD &map, int targetClassID) {
@@ -247,7 +362,9 @@ double obstacleSteeringCorrection(const AI_RECORD &map, int targetClassID) {
 /*  Apply drive powers with obstacle avoidance blended in                    */
 /*---------------------------------------------------------------------------*/
 void applyDrive(double baseSpeed, double targetSteer, double obstacleSteer) {
-    double totalSteer = targetSteer + obstacleSteer;
+    // Add GPS-based field boundary avoidance
+    double gpsSteer = gpsFieldBoundaryAvoidance();
+    double totalSteer = targetSteer + obstacleSteer + gpsSteer;
 
     double lp = baseSpeed + totalSteer;
     double rp = baseSpeed - totalSteer;
@@ -393,6 +510,132 @@ void driveToGoal() {
 #endif // GOALS_ENABLED
 
 /*---------------------------------------------------------------------------*/
+/*  GPS-based goal positioning - positions robot in front of goal to score  */
+/*  Uses GPS coordinates for precise positioning regardless of camera view  */
+/*---------------------------------------------------------------------------*/
+void gpsPositionForGoal(double goalX, double goalY, bool useLoader) {
+    Brain.Screen.clearScreen();
+    Brain.Screen.setCursor(1, 1);
+    Brain.Screen.print("GPS POSITIONING FOR GOAL");
+    
+    // Calculate target position: stand 30cm in front of goal
+    double approachDist = 30.0;  // cm
+    double angleToGoal = gpsAngleTo(goalX, goalY);
+    
+    // Target position is 30cm away from goal, on the line from robot to goal
+    double currentDist = gpsDistanceTo(goalX, goalY);
+    double targetDist = currentDist - approachDist;
+    
+    double robotX = GPS.xPosition(distanceUnits::cm);
+    double robotY = GPS.yPosition(distanceUnits::cm);
+    
+    // Calculate approach position
+    double dx = goalX - robotX;
+    double dy = goalY - robotY;
+    double norm = sqrt(dx*dx + dy*dy);
+    double targetX = robotX + (dx/norm) * targetDist;
+    double targetY = robotY + (dy/norm) * targetDist;
+    
+    Brain.Screen.setCursor(2, 1);
+    Brain.Screen.print("Goal: (%.1f,%.1f)", goalX, goalY);
+    Brain.Screen.setCursor(3, 1);
+    Brain.Screen.print("Target: (%.1f,%.1f)", targetX, targetY);
+    
+    // Move to approach position using GPS
+    uint32_t startTime = Brain.Timer.system();
+    uint32_t timeout = 15000;  // 15 second timeout
+    
+    while ((Brain.Timer.system() - startTime) < timeout) {
+        double currentX = GPS.xPosition(distanceUnits::cm);
+        double currentY = GPS.yPosition(distanceUnits::cm);
+        double distToTarget = sqrt((targetX - currentX)*(targetX - currentX) + 
+                                   (targetY - currentY)*(targetY - currentY));
+        
+        Brain.Screen.setCursor(4, 1);
+        Brain.Screen.print("Dist: %.1f cm", distToTarget);
+        Brain.Screen.setCursor(5, 1);
+        Brain.Screen.print("Pos: (%.1f,%.1f)", currentX, currentY);
+        
+        if (distToTarget < GPS_POSITION_TOLERANCE) {
+            // Reached target position, now turn to face goal
+            leftDrive.stop(brake);
+            rightDrive.stop(brake);
+            
+            // Turn to face goal
+            double finalAngle = gpsAngleTo(goalX, goalY);
+            double currentHeading = GPS.heading(degrees);
+            double angleDiff = finalAngle - currentHeading;
+            while (angleDiff > 180) angleDiff -= 360;
+            while (angleDiff < -180) angleDiff += 360;
+            
+            Brain.Screen.setCursor(6, 1);
+            Brain.Screen.print("Turning to %.1f deg", finalAngle);
+            
+            // Turn to face goal
+            if (fabs(angleDiff) > 5.0) {
+                turnType dir = (angleDiff > 0) ? right : left;
+                leftDrive.setVelocity(20, percent);
+                rightDrive.setVelocity(20, percent);
+                Drivetrain.turnToHeading(finalAngle, degrees, 20, velocityUnits::pct);
+            }
+            
+            leftDrive.stop(brake);
+            rightDrive.stop(brake);
+            
+            // Score!
+            Brain.Screen.setCursor(7, 1);
+            Brain.Screen.print("SCORING!");
+            
+            if (useLoader) {
+                Loader.setVelocity(50, percent);
+                Loader.spin(forward);
+                Intake.spin(reverse);
+                wait(5, seconds);
+                Intake.stop();
+                Loader.spin(reverse);
+                wait(2, seconds);
+                Loader.stop();
+            } else {
+                Outake.setVelocity(50, percent);
+                Outake.spin(forward);
+                Intake.spin(reverse);
+                wait(5, seconds);
+                Intake.stop();
+                Outake.stop();
+            }
+            
+            blocksCollected = 0;
+            return;
+        }
+        
+        // Drive toward target position
+        double angleToTarget = gpsAngleTo(targetX, targetY);
+        double currentHeading = GPS.heading(degrees);
+        double steerAngle = angleToTarget - currentHeading;
+        while (steerAngle > 180) steerAngle -= 360;
+        while (steerAngle < -180) steerAngle += 360;
+        
+        double targetSteer = steerAngle * 0.8;
+        double baseSpeed = (distToTarget < 50.0) 
+            ? NEAR_DRIVE_SPEED + (distToTarget/50.0 * (GOAL_APPROACH_SPEED - NEAR_DRIVE_SPEED))
+            : GOAL_APPROACH_SPEED;
+        
+        // Get field boundary avoidance
+        double gpsSteer = gpsFieldBoundaryAvoidance();
+        
+        applyDrive(baseSpeed, targetSteer, gpsSteer);
+        
+        this_thread::sleep_for(33);
+    }
+    
+    // Timeout - stop
+    leftDrive.stop(brake);
+    rightDrive.stop(brake);
+    Brain.Screen.setCursor(8, 1);
+    Brain.Screen.print("TIMEOUT");
+}
+
+/*---------------------------------------------------------------------------*/
 /*  Autonomous                                                               */
 /*---------------------------------------------------------------------------*/
 void autonomousMain(void) {
@@ -434,6 +677,31 @@ int main() {
             Brain.Screen.setCursor(1, 1);
             Brain.Screen.print("SKILLS COMPLETE");
             wait(2, seconds);
+        }
+        
+        // GPS-based goal scoring via controller (Up + Y for Loader, Up + B for Long)
+        if (Controller.ButtonUp.pressing()) {
+            if (Controller.ButtonY.pressing()) {
+                leftDrive.stop(brake);
+                rightDrive.stop(brake);
+                targetTracker.reset();
+                Brain.Screen.clearScreen();
+                Brain.Screen.setCursor(1, 1);
+                Brain.Screen.print("GPS GOAL: LOADER");
+                wait(0.5, seconds);
+                gpsPositionForGoal(GOAL_LOADER_X, GOAL_LOADER_Y, true);
+                wait(1, seconds);
+            } else if (Controller.ButtonB.pressing()) {
+                leftDrive.stop(brake);
+                rightDrive.stop(brake);
+                targetTracker.reset();
+                Brain.Screen.clearScreen();
+                Brain.Screen.setCursor(1, 1);
+                Brain.Screen.print("GPS GOAL: LONG");
+                wait(0.5, seconds);
+                gpsPositionForGoal(GOAL_LONG_X, GOAL_LONG_Y, false);
+                wait(1, seconds);
+            }
         }
 
         // Go score if enough blocks collected (disabled until goal model is trained)
@@ -511,16 +779,25 @@ int main() {
             // ---------------------------------------------------------------
             // TRACKING: camera has a confirmed lock on the target.
             // ---------------------------------------------------------------
+            double robotX = GPS.xPosition(distanceUnits::cm);
+            double robotY = GPS.yPosition(distanceUnits::cm);
+            double heading = GPS.heading(degrees);
+            double frontX, frontY;
+            getRobotFrontPosition(frontX, frontY);
+            
             Brain.Screen.clearScreen();
             Brain.Screen.setCursor(1, 1);
             Brain.Screen.print("TRACKING %d/%d  %.2fm",
                 blocksCollected + 1, BLOCKS_TO_COLLECT, dist);
             Brain.Screen.setCursor(2, 1);
-            Brain.Screen.print("conf:%d/%d  misses:%d",
+            Brain.Screen.print("GPS:(%.1f,%.1f) H:%.0f",
+                robotX, robotY, heading);
+            Brain.Screen.setCursor(3, 1);
+            Brain.Screen.print("conf:%d/%d  miss:%d",
                 targetTracker.windowHits(), CONFIRM_WINDOW,
                 targetTracker.consecutiveMisses);
             if (fabs(avoidSteer) > 5.0) {
-                Brain.Screen.setCursor(4, 1);
+                Brain.Screen.setCursor(5, 1);
                 Brain.Screen.print("AVOIDING steer:%.1f", avoidSteer);
             }
 
@@ -605,14 +882,21 @@ int main() {
                     leftDrive.spin(rotateRight  ? forward : reverse);
                     rightDrive.spin(rotateRight ? reverse : forward);
 
+                    double robotX = GPS.xPosition(distanceUnits::cm);
+                    double robotY = GPS.yPosition(distanceUnits::cm);
+                    double heading = GPS.heading(degrees);
+                    
                     Brain.Screen.clearScreen();
                     Brain.Screen.setCursor(1, 1);
                     Brain.Screen.print("SCANNING... %d/%d",
                         blocksCollected, BLOCKS_TO_COLLECT);
                     Brain.Screen.setCursor(2, 1);
+                    Brain.Screen.print("GPS:(%.1f,%.1f) H:%.0f",
+                        robotX, robotY, heading);
+                    Brain.Screen.setCursor(3, 1);
                     Brain.Screen.print("conf:%d/%d  need:%d",
                         targetTracker.windowHits(), CONFIRM_WINDOW, threshold);
-                    Brain.Screen.setCursor(3, 1);
+                    Brain.Screen.setCursor(4, 1);
                     Brain.Screen.print("Rotating %s", rotateRight ? "RIGHT" : "LEFT");
                 } else {
                     // Target detected — start or continue the acquire delay
