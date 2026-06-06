@@ -43,7 +43,7 @@ int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goa
 
 // ===== SPEED SETTINGS =====
 // *** TESTING: set to 10. Change to 75 (or higher) for competition. ***
-#define DRIVE_SPEED_PCT      10.0  // Master speed control (all other speeds derive from this)
+#define DRIVE_SPEED_PCT      80.0  // Master speed control (all other speeds derive from this)
 
 // Derived speeds (automatically calculated - don't edit directly)
 #define BASE_DRIVE_SPEED    (DRIVE_SPEED_PCT)        // Normal driving speed
@@ -97,7 +97,7 @@ double COLLECTION_TIME     = 5.0;  // seconds - how long to run intake after rea
 #define GOAL_LONG_Y     110.0   // cm - Long goal Y position
 
 // ===== GPS POSITIONING SETTINGS =====
-#define GPS_OBSTACLE_AVOID_DIST  30.0  // cm - avoid boundaries at this distance
+#define GPS_OBSTACLE_AVOID_DIST  15.0  // cm - avoid boundaries at this distance
 #define GPS_POSITION_TOLERANCE    5.0  // cm - acceptable positioning error
 
 // ===== GOAL DETECTION (DISABLED - model not trained yet) =====
@@ -215,16 +215,23 @@ ConfidenceTracker targetTracker;
 int      blocksCollected     = 0;
 bool     collectingBlock     = false;
 uint32_t collectionStartTime = 0;
-
-// Blind approach state — active while driving the last BLIND_APPROACH_DIST blind
 bool     blindApproachActive    = false;
 uint32_t blindApproachStartTime = 0;
-uint32_t blindApproachDuration  = 0;   // ms — computed when blind approach starts
-double   blindApproachSteer     = 0.0; // locked heading steer value
-
-// Acquire delay state
-uint32_t firstDetectTime    = 0;   // timestamp of first detection in current acquire cycle
+uint32_t blindApproachDuration  = 0;
+double   blindApproachSteer     = 0.0;
+uint32_t firstDetectTime    = 0;
 bool     acquireDelayActive = false;
+
+// Helper: Display robot status on brain screen
+void displayStatus(const char* mode, double dist = 0, double gpsX = 0, double gpsY = 0, double heading = 0) {
+    Brain.Screen.clearScreen();
+    Brain.Screen.setCursor(1, 1);
+    Brain.Screen.print("%s %d/%d", mode, blocksCollected + 1, BLOCKS_TO_COLLECT);
+    if (dist > 0) {
+        Brain.Screen.setCursor(2, 1);
+        Brain.Screen.print("D:%.2fm GPS:(%.0f,%.0f) H:%.0f", dist, gpsX, gpsY, heading);
+    }
+}
 
 /*---------------------------------------------------------------------------*/
 /*  GPS Helper Functions                                                     */
@@ -383,171 +390,27 @@ void applyDrive(double baseSpeed, double targetSteer, double obstacleSteer) {
 }
 
 /*---------------------------------------------------------------------------*/
-/*  Drive to the goal using Jetson camera detections                         */
-/*  NOTE: Disabled until goal model is trained (GOALS_ENABLED = 0)          */
-/*---------------------------------------------------------------------------*/
-#if GOALS_ENABLED
-void driveToGoal() {
-    // Goal class IDs — fill in from types.ts when model is trained
-    #define GOAL_LOADER_CLASSID 4   // Loader goal (uses Loader motor)
-    #define GOAL_LONG_CLASSID   5   // Long goal (uses Outake motor)
-    #define TARGET_GOAL         0  // 0=Loader 1=Long 2=Closest
-    Brain.Screen.clearScreen();
-    Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("GOING TO GOAL!");
-
-    int goalClassID = GOAL_LOADER_CLASSID;
-    bool useLoader = true;  // true = Loader goal, false = Long goal
-    
-    if (TARGET_GOAL == 1) {
-        goalClassID = GOAL_LONG_CLASSID;
-        useLoader = false;
-    } else if (TARGET_GOAL == 0) {
-        goalClassID = GOAL_LOADER_CLASSID;
-        useLoader = true;
-    }
-
-    bool     reachedGoal     = false;
-    uint32_t searchStartTime = Brain.Timer.system();
-    uint32_t searchTimeout   = 30000;
-
-    while (!reachedGoal && (Brain.Timer.system() - searchStartTime) < searchTimeout) {
-        static AI_RECORD goal_map;
-        jetson_comms.get_data(&goal_map);
-
-        bool   goalFound       = false;
-        int    goalIndex       = -1;
-        double closestGoalDist = 999999.0;
-
-        for (int i = 0; i < goal_map.detectionCount; i++) {
-            bool isTarget = false;
-            if (TARGET_GOAL == 2) {
-                // Closest goal (either type)
-                isTarget = (goal_map.detections[i].classID == GOAL_LOADER_CLASSID ||
-                            goal_map.detections[i].classID == GOAL_LONG_CLASSID);
-            } else {
-                isTarget = (goal_map.detections[i].classID == goalClassID);
-            }
-            if (isTarget) {
-                double x = goal_map.detections[i].mapLocation.x;
-                double y = goal_map.detections[i].mapLocation.y;
-                double d = sqrt(x * x + y * y);
-                if (d < closestGoalDist) {
-                    closestGoalDist = d;
-                    goalIndex       = i;
-                    goalFound       = true;
-                    // If searching for closest, determine which type it is
-                    if (TARGET_GOAL == 2) {
-                        useLoader = (goal_map.detections[i].classID == GOAL_LOADER_CLASSID);
-                    }
-                }
-            }
-        }
-
-        if (goalFound) {
-            double gx   = goal_map.detections[goalIndex].mapLocation.x;
-            double gy   = goal_map.detections[goalIndex].mapLocation.y;
-            double dist = sqrt(gx * gx + gy * gy);
-
-            Brain.Screen.setCursor(2, 1);
-            Brain.Screen.print("Goal Dist: %.2f m", dist);
-
-            double avoidSteer = obstacleSteeringCorrection(goal_map, goalClassID);
-            if (fabs(avoidSteer) > 5.0) {
-                Brain.Screen.setCursor(4, 1);
-                Brain.Screen.print("AVOIDING  steer:%.1f", avoidSteer);
-            }
-
-            if (dist <= 0.1) {
-                reachedGoal = true;
-                leftDrive.stop(brake);
-                rightDrive.stop(brake);
-
-                if (useLoader) {
-                    // Score on Loader goal using Loader motor
-                    Brain.Screen.setCursor(3, 1);
-                    Brain.Screen.print("SCORING ON LOADER GOAL");
-                    Loader.setVelocity(50, percent);
-                    Loader.spin(forward);
-                    Intake.spin(reverse);
-                    wait(5, seconds);
-                    Intake.stop();
-                    Loader.spin(reverse);
-                    wait(2, seconds);
-                    Loader.stop();
-                } else {
-                    // Score on Long goal using Outake motor
-                    Brain.Screen.setCursor(3, 1);
-                    Brain.Screen.print("SCORING ON LONG GOAL");
-                    Outake.setVelocity(50, percent);
-                    Outake.spin(forward);
-                    Intake.spin(reverse);
-                    wait(5, seconds);
-                    Intake.stop();
-                    Outake.stop();
-                }
-            } else {
-                double angle       = atan2(gx, gy) * (180.0 / M_PI);
-                double targetSteer = angle * 0.85;
-                double baseSpeed   = (dist < 1.0)
-                    ? NEAR_DRIVE_SPEED + (dist * (GOAL_APPROACH_SPEED - NEAR_DRIVE_SPEED))
-                    : GOAL_APPROACH_SPEED;
-
-                applyDrive(baseSpeed, targetSteer, avoidSteer);
-            }
-        } else {
-            // Rotate to search for goal
-            leftDrive.setVelocity(SEARCH_SPIN_SPEED, percent);
-            rightDrive.setVelocity(SEARCH_SPIN_SPEED, percent);
-            leftDrive.spin(forward);
-            rightDrive.spin(reverse);
-        }
-
-        jetson_comms.request_map();
-        this_thread::sleep_for(33);
-    }
-
-    leftDrive.stop(brake);
-    rightDrive.stop(brake);
-    blocksCollected = 0;
-}
-#endif // GOALS_ENABLED
-
-/*---------------------------------------------------------------------------*/
 /*  GPS-based goal positioning - positions robot in front of goal to score  */
-/*  Uses GPS coordinates for precise positioning regardless of camera view  */
 /*---------------------------------------------------------------------------*/
 void gpsPositionForGoal(double goalX, double goalY, bool useLoader) {
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("GPS POSITIONING FOR GOAL");
+    Brain.Screen.print("GPS GOAL POSITIONING");
     
-    // Calculate target position: stand 30cm in front of goal
-    double approachDist = 30.0;  // cm
-    double angleToGoal = gpsAngleTo(goalX, goalY);
-    
-    // Target position is 30cm away from goal, on the line from robot to goal
-    double currentDist = gpsDistanceTo(goalX, goalY);
-    double targetDist = currentDist - approachDist;
-    
+    // Calculate target: 30cm in front of goal
+    double approachDist = 30.0;
     double robotX = GPS.xPosition(distanceUnits::cm);
     double robotY = GPS.yPosition(distanceUnits::cm);
-    
-    // Calculate approach position
     double dx = goalX - robotX;
     double dy = goalY - robotY;
-    double norm = sqrt(dx*dx + dy*dy);
-    double targetX = robotX + (dx/norm) * targetDist;
-    double targetY = robotY + (dy/norm) * targetDist;
+    double currentDist = sqrt(dx*dx + dy*dy);
+    double norm = currentDist;
+    double targetX = robotX + (dx/norm) * (currentDist - approachDist);
+    double targetY = robotY + (dy/norm) * (currentDist - approachDist);
     
-    Brain.Screen.setCursor(2, 1);
-    Brain.Screen.print("Goal: (%.1f,%.1f)", goalX, goalY);
-    Brain.Screen.setCursor(3, 1);
-    Brain.Screen.print("Target: (%.1f,%.1f)", targetX, targetY);
-    
-    // Move to approach position using GPS
+    // Move to approach position
     uint32_t startTime = Brain.Timer.system();
-    uint32_t timeout = 15000;  // 15 second timeout
+    uint32_t timeout = 15000;
     
     while ((Brain.Timer.system() - startTime) < timeout) {
         double currentX = GPS.xPosition(distanceUnits::cm);
@@ -753,56 +616,31 @@ int main() {
 
         // --- ACT ON CONFIRMED TARGET ---
         if (blindApproachActive) {
-            // ---------------------------------------------------------------
-            // BLIND APPROACH: camera can't see the target at this range.
-            // Drive straight on the locked heading until the timed run completes,
-            // then immediately start collection.
-            // ---------------------------------------------------------------
+            // BLIND APPROACH: drive straight on locked heading
             uint32_t elapsed = Brain.Timer.system() - blindApproachStartTime;
-
-            Brain.Screen.clearScreen();
-            Brain.Screen.setCursor(1, 1);
-            Brain.Screen.print("BLIND APPROACH %d/%d", blocksCollected + 1, BLOCKS_TO_COLLECT);
+            displayStatus("BLIND", 0);
             Brain.Screen.setCursor(2, 1);
-            Brain.Screen.print("time: %dms / %dms", (int)elapsed, (int)blindApproachDuration);
+            Brain.Screen.print("%d/%dms", (int)elapsed, (int)blindApproachDuration);
 
             if (elapsed >= blindApproachDuration) {
-                // Blind run complete — start intake
                 blindApproachActive = false;
                 collectingBlock     = true;
                 collectionStartTime = Brain.Timer.system();
                 Intake.spin(forward);
-                Brain.Screen.setCursor(3, 1);
-                Brain.Screen.print("COLLECTING!");
             } else {
-                // Drive straight on locked heading (no obstacle avoidance during blind run)
                 applyDrive(COLLECT_DRIVE_SPEED, blindApproachSteer, 0.0);
             }
 
         } else if (confirmed && rawFound) {
-            // ---------------------------------------------------------------
-            // TRACKING: camera has a confirmed lock on the target.
-            // ---------------------------------------------------------------
+            // TRACKING: camera has a confirmed lock on the target
             double robotX = GPS.xPosition(distanceUnits::cm);
             double robotY = GPS.yPosition(distanceUnits::cm);
             double heading = GPS.heading(degrees);
-            double frontX, frontY;
-            getRobotFrontPosition(frontX, frontY);
+            displayStatus("TRACK", dist, robotX, robotY, heading);
             
-            Brain.Screen.clearScreen();
-            Brain.Screen.setCursor(1, 1);
-            Brain.Screen.print("TRACKING %d/%d  %.2fm",
-                blocksCollected + 1, BLOCKS_TO_COLLECT, dist);
-            Brain.Screen.setCursor(2, 1);
-            Brain.Screen.print("GPS:(%.1f,%.1f) H:%.0f",
-                robotX, robotY, heading);
-            Brain.Screen.setCursor(3, 1);
-            Brain.Screen.print("conf:%d/%d  miss:%d",
-                targetTracker.windowHits(), CONFIRM_WINDOW,
-                targetTracker.consecutiveMisses);
             if (fabs(avoidSteer) > 5.0) {
-                Brain.Screen.setCursor(5, 1);
-                Brain.Screen.print("AVOIDING steer:%.1f", avoidSteer);
+                Brain.Screen.setCursor(3, 1);
+                Brain.Screen.print("AVOID:%.1f", avoidSteer);
             }
 
             if (collectingBlock) {
@@ -842,39 +680,26 @@ int main() {
                     : BASE_DRIVE_SPEED;
 
                 applyDrive(baseSpeed, targetSteer, avoidSteer);
-
-                Brain.Screen.setCursor(3, 1);
-                Brain.Screen.print("spd:%.0f steer:%.1f", baseSpeed, targetSteer);
             }
 
         } else if (confirmed && !rawFound) {
-            // ---------------------------------------------------------------
-            // HOLDING: confirmed but missed this frame.
-            // If the last known distance was already in the blind zone,
-            // start the blind approach now rather than waiting to lose confirmation.
-            // ---------------------------------------------------------------
+            // HOLDING: confirmed but missed this frame
             if (!blindApproachActive && closestDist <= CAMERA_MIN_DIST) {
                 blindApproachActive    = true;
                 blindApproachStartTime = Brain.Timer.system();
-                // No fresh angle this frame — reuse last steer if available,
-                // otherwise drive straight (steer = 0)
                 blindApproachSteer    = 0.0;
                 blindApproachDuration = (uint32_t)(
                     (BLIND_APPROACH_DIST / BLIND_APPROACH_SPEED_MPS) * 1000.0);
             }
-
-            Brain.Screen.clearScreen();
-            Brain.Screen.setCursor(1, 1);
-            Brain.Screen.print("HOLDING... miss:%d/%d",
-                targetTracker.consecutiveMisses, LOSE_THRESHOLD);
+            displayStatus("HOLD", 0);
 
         } else {
-            // Not confirmed — either acquiring or lost
+            // Not confirmed — acquiring or lost
             if (!collectingBlock) {
                 int threshold = confirmThresholdForClass(TARGET_CLASSID);
 
                 if (!rawFound) {
-                    // No detection at all — reset acquire delay and rotate to scan
+                    // No detection - rotate to scan
                     acquireDelayActive = false;
                     firstDetectTime    = 0;
 
@@ -889,46 +714,17 @@ int main() {
                     double robotX = GPS.xPosition(distanceUnits::cm);
                     double robotY = GPS.yPosition(distanceUnits::cm);
                     double heading = GPS.heading(degrees);
-                    
-                    Brain.Screen.clearScreen();
-                    Brain.Screen.setCursor(1, 1);
-                    Brain.Screen.print("SCANNING... %d/%d",
-                        blocksCollected, BLOCKS_TO_COLLECT);
-                    Brain.Screen.setCursor(2, 1);
-                    Brain.Screen.print("GPS:(%.1f,%.1f) H:%.0f",
-                        robotX, robotY, heading);
-                    Brain.Screen.setCursor(3, 1);
-                    Brain.Screen.print("conf:%d/%d  need:%d",
-                        targetTracker.windowHits(), CONFIRM_WINDOW, threshold);
-                    Brain.Screen.setCursor(4, 1);
-                    Brain.Screen.print("Rotating %s", rotateRight ? "RIGHT" : "LEFT");
+                    displayStatus("SCAN", 0, robotX, robotY, heading);
                 } else {
-                    // Target detected — start or continue the acquire delay
+                    // Target detected - acquiring
                     if (!acquireDelayActive) {
                         acquireDelayActive = true;
                         firstDetectTime    = Brain.Timer.system();
                     }
 
-                    uint32_t delayElapsed = Brain.Timer.system() - firstDetectTime;
-                    bool     delayDone    = (delayElapsed >= ACQUIRE_DELAY_MS);
-
-                    // Hold still while waiting and building confidence
                     leftDrive.stop(brake);
                     rightDrive.stop(brake);
-
-                    Brain.Screen.clearScreen();
-                    Brain.Screen.setCursor(1, 1);
-                    Brain.Screen.print("ACQUIRING... %.2fm", dist);
-                    Brain.Screen.setCursor(2, 1);
-                    Brain.Screen.print("conf:%d/%d  need:%d",
-                        targetTracker.windowHits(), CONFIRM_WINDOW, threshold);
-                    Brain.Screen.setCursor(3, 1);
-                    if (!delayDone) {
-                        Brain.Screen.print("wait: %dms / %dms",
-                            (int)delayElapsed, ACQUIRE_DELAY_MS);
-                    } else {
-                        Brain.Screen.print("ready — waiting for conf");
-                    }
+                    displayStatus("ACQUIRE", dist);
                 }
             } else if ((Brain.Timer.system() - collectionStartTime) >=
                            (uint32_t)(COLLECTION_TIME * 1000)) {
