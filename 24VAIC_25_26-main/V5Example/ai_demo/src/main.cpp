@@ -43,7 +43,7 @@ int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goa
 
 // ===== SPEED SETTINGS =====
 // *** TESTING: set to 10. Change to 75 (or higher) for competition. ***
-#define DRIVE_SPEED_PCT      80.0  // Master speed control (all other speeds derive from this)
+#define DRIVE_SPEED_PCT      50.0  // Master speed control (all other speeds derive from this)
 
 // Derived speeds (automatically calculated - don't edit directly)
 #define BASE_DRIVE_SPEED    (DRIVE_SPEED_PCT)        // Normal driving speed
@@ -53,10 +53,6 @@ int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goa
 #define GOAL_APPROACH_SPEED (DRIVE_SPEED_PCT)        // Driving to goal
 
 // ===== CAMERA & DETECTION SETTINGS =====
-#define CAMERA_MIN_DIST       0.10  // meters - camera loses target below this distance
-#define BLIND_APPROACH_DIST   0.20  // meters - distance to drive blind to reach target
-#define BLIND_APPROACH_SPEED_MPS  0.40  // m/s - robot speed at COLLECT_DRIVE_SPEED (measure & adjust)
-
 // Detection confirmation (prevents false positives)
 #define CONFIRM_WINDOW      10     // Frame window size for confirmation
 #define LOSE_THRESHOLD       5     // Consecutive misses before dropping target
@@ -211,10 +207,6 @@ ConfidenceTracker targetTracker;
 int      blocksCollected     = 0;
 bool     collectingBlock     = false;
 uint32_t collectionStartTime = 0;
-bool     blindApproachActive    = false;
-uint32_t blindApproachStartTime = 0;
-uint32_t blindApproachDuration  = 0;
-double   blindApproachSteer     = 0.0;
 uint32_t firstDetectTime    = 0;
 bool     acquireDelayActive = false;
 
@@ -611,23 +603,7 @@ int main() {
         double avoidSteer = obstacleSteeringCorrection(local_map, TARGET_CLASSID);
 
         // --- ACT ON CONFIRMED TARGET ---
-        if (blindApproachActive) {
-            // BLIND APPROACH: drive straight on locked heading
-            uint32_t elapsed = Brain.Timer.system() - blindApproachStartTime;
-            displayStatus("BLIND", 0);
-            Brain.Screen.setCursor(2, 1);
-            Brain.Screen.print("%d/%dms", (int)elapsed, (int)blindApproachDuration);
-
-            if (elapsed >= blindApproachDuration) {
-                blindApproachActive = false;
-                collectingBlock     = true;
-                collectionStartTime = Brain.Timer.system();
-                Intake.spin(forward);
-            } else {
-                applyDrive(COLLECT_DRIVE_SPEED, blindApproachSteer, 0.0);
-            }
-
-        } else if (confirmed && rawFound) {
+        if (confirmed && rawFound) {
             // TRACKING: camera has a confirmed lock on the target
             double robotX = GPS.xPosition(distanceUnits::cm);
             double robotY = GPS.yPosition(distanceUnits::cm);
@@ -640,7 +616,7 @@ int main() {
             }
 
             if (collectingBlock) {
-                // Already collecting from a previous blind approach completion
+                // Collecting - wait for collection time to complete
                 if ((Brain.Timer.system() - collectionStartTime) >=
                         (uint32_t)(COLLECTION_TIME * 1000)) {
                     collectingBlock    = false;
@@ -653,20 +629,13 @@ int main() {
                     double targetSteer = angle * 0.85;
                     applyDrive(COLLECT_DRIVE_SPEED, targetSteer, avoidSteer);
                 }
-            } else if (dist <= CAMERA_MIN_DIST) {
-                // ---------------------------------------------------------------
-                // Target is within the camera blind zone — start blind approach.
-                // Lock the current heading and compute how long to drive.
-                // ---------------------------------------------------------------
-                blindApproachActive    = true;
-                blindApproachStartTime = Brain.Timer.system();
-                blindApproachSteer     = atan2(tx, ty) * (180.0 / M_PI) * 0.85;
-                // Time (ms) = distance (m) / speed (m/s) * 1000
-                blindApproachDuration  = (uint32_t)(
-                    (BLIND_APPROACH_DIST / BLIND_APPROACH_SPEED_MPS) * 1000.0);
-
+            } else if (dist <= 0.15) {
+                // Close enough - start collecting
+                collectingBlock     = true;
+                collectionStartTime = Brain.Timer.system();
+                Intake.spin(forward);
                 Brain.Screen.setCursor(3, 1);
-                Brain.Screen.print("BLIND START  dur:%dms", (int)blindApproachDuration);
+                Brain.Screen.print("COLLECTING!");
             } else {
                 // Normal tracking — drive toward target with obstacle avoidance
                 double angle       = atan2(tx, ty) * (180.0 / M_PI);
@@ -680,13 +649,6 @@ int main() {
 
         } else if (confirmed && !rawFound) {
             // HOLDING: confirmed but missed this frame
-            if (!blindApproachActive && closestDist <= CAMERA_MIN_DIST) {
-                blindApproachActive    = true;
-                blindApproachStartTime = Brain.Timer.system();
-                blindApproachSteer    = 0.0;
-                blindApproachDuration = (uint32_t)(
-                    (BLIND_APPROACH_DIST / BLIND_APPROACH_SPEED_MPS) * 1000.0);
-            }
             displayStatus("HOLD", 0);
 
         } else {
