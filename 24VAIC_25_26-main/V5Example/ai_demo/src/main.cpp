@@ -144,10 +144,6 @@ ai::robot_link link(PORT20, "robot_32456_1", linkType::manager);
 #pragma message("building for the worker")
 ai::robot_link link(PORT10, "robot_32456_1", linkType::worker);
 #endif
-        case BALL_RED_IN_GOAL_ID:  return 8;   // BallRedInGoal — rarely a chase target
-        default:                   return 4;   // Any / unknown
-    }
-}
 
 // ===== DETECTION CONFIDENCE TRACKER =====
 // Circular buffer recording whether the target was seen (1) or not (0) each frame.
