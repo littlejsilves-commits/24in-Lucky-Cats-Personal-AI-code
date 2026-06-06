@@ -17,25 +17,21 @@ brain Brain;
 controller Controller;
 
 // Drive motors - three per side (motor_group)
-motor leftDrive1  = motor(PORT13, ratio18_1, true);
-motor leftDrive2  = motor(PORT14, ratio18_1, true);
-motor leftDrive3  = motor(PORT15, ratio18_1, true);
+motor leftDrive1  = motor(PORT11, ratio18_1, true);
+motor leftDrive2  = motor(PORT12, ratio18_1, true);
+motor leftDrive3  = motor(PORT13, ratio18_1, true);
 
-motor rightDrive1 = motor(PORT16, ratio18_1, false);
-motor rightDrive2 = motor(PORT17, ratio18_1, false);
-motor rightDrive3 = motor(PORT18, ratio18_1, false);
+motor rightDrive1 = motor(PORT14, ratio18_1, false);
+motor rightDrive2 = motor(PORT15, ratio18_1, false);
+motor rightDrive3 = motor(PORT16, ratio18_1, false);
 
 motor_group leftDrive  = motor_group(leftDrive1, leftDrive2, leftDrive3);
 motor_group rightDrive = motor_group(rightDrive1, rightDrive2, rightDrive3);
 
-// Intake and belt
+// Intake, Outake, and Loader
 motor Intake = motor(PORT1, ratio18_1, true);
-motor Belt   = motor(PORT3, ratio18_1, false);
-
-// Lever mechanism
-motor Lever1 = motor(PORT11, ratio18_1, false);
-motor Lever2 = motor(PORT12, ratio18_1, false);
-motor_group Lever = motor_group(Lever1, Lever2);
+motor Outake = motor(PORT2, ratio18_1, false);
+motor Loader = motor(PORT3, ratio18_1, false);
 
 // Dummy GPS + Drivetrain (required by ai_functions.cpp — GPS not used for navigation)
 gps GPS = gps(PORT22, 0, 0, distanceUnits::mm, 0);
@@ -214,10 +210,22 @@ double obstacleSteeringCorrection(const AI_RECORD &map, int targetClassID) {
     for (int i = 0; i < map.detectionCount; i++) {
         int id = map.detections[i].classID;
 
+        // Skip the target ball
         bool isTarget = (targetClassID == -1) || (id == targetClassID);
-        // Goals are not yet in the model — skip goal filtering until GOALS_ENABLED
         if (isTarget) continue;
 
+        // Skip ALL balls/blocks - robot should only avoid field obstacles
+        // Class IDs: 0=BallBlue, 1=BallBlueInGoal, 2=BallRed, 3=BallRedInGoal
+        bool isBall = (id == BALL_BLUE_ID || id == BALL_BLUE_IN_GOAL_ID ||
+                       id == BALL_RED_ID  || id == BALL_RED_IN_GOAL_ID);
+        if (isBall) continue;
+
+        // Skip goals (when GOALS_ENABLED and goal model is trained)
+        // This will be uncommented when goals are added to the model
+        // bool isGoal = (id == GOAL_LOADER_CLASSID || id == GOAL_LONG_CLASSID);
+        // if (isGoal) continue;
+
+        // Only avoid actual obstacles (robots, walls, field elements)
         double ox   = map.detections[i].mapLocation.x;
         double oy   = map.detections[i].mapLocation.y;
         double dist = sqrt(ox * ox + oy * oy);
@@ -260,17 +268,23 @@ void applyDrive(double baseSpeed, double targetSteer, double obstacleSteer) {
 #if GOALS_ENABLED
 void driveToGoal() {
     // Goal class IDs — fill in from types.ts when model is trained
-    #define GOAL_CENTER_CLASSID 4
-    #define GOAL_RED_CLASSID    5
-    #define GOAL_BLUE_CLASSID   6
-    #define TARGET_GOAL         0  // 0=Center 1=Red 2=Blue 3=Closest
+    #define GOAL_LOADER_CLASSID 4   // Loader goal (uses Loader motor)
+    #define GOAL_LONG_CLASSID   5   // Long goal (uses Outake motor)
+    #define TARGET_GOAL         0  // 0=Loader 1=Long 2=Closest
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
     Brain.Screen.print("GOING TO GOAL!");
 
-    int goalClassID = GOAL_CENTER_CLASSID;
-    if (TARGET_GOAL == 1) goalClassID = GOAL_RED_CLASSID;
-    else if (TARGET_GOAL == 2) goalClassID = GOAL_BLUE_CLASSID;
+    int goalClassID = GOAL_LOADER_CLASSID;
+    bool useLoader = true;  // true = Loader goal, false = Long goal
+    
+    if (TARGET_GOAL == 1) {
+        goalClassID = GOAL_LONG_CLASSID;
+        useLoader = false;
+    } else if (TARGET_GOAL == 0) {
+        goalClassID = GOAL_LOADER_CLASSID;
+        useLoader = true;
+    }
 
     bool     reachedGoal     = false;
     uint32_t searchStartTime = Brain.Timer.system();
@@ -286,10 +300,10 @@ void driveToGoal() {
 
         for (int i = 0; i < goal_map.detectionCount; i++) {
             bool isTarget = false;
-            if (TARGET_GOAL == 3) {
-                isTarget = (goal_map.detections[i].classID == GOAL_CENTER_CLASSID ||
-                            goal_map.detections[i].classID == GOAL_RED_CLASSID    ||
-                            goal_map.detections[i].classID == GOAL_BLUE_CLASSID);
+            if (TARGET_GOAL == 2) {
+                // Closest goal (either type)
+                isTarget = (goal_map.detections[i].classID == GOAL_LOADER_CLASSID ||
+                            goal_map.detections[i].classID == GOAL_LONG_CLASSID);
             } else {
                 isTarget = (goal_map.detections[i].classID == goalClassID);
             }
@@ -301,6 +315,10 @@ void driveToGoal() {
                     closestGoalDist = d;
                     goalIndex       = i;
                     goalFound       = true;
+                    // If searching for closest, determine which type it is
+                    if (TARGET_GOAL == 2) {
+                        useLoader = (goal_map.detections[i].classID == GOAL_LOADER_CLASSID);
+                    }
                 }
             }
         }
@@ -324,20 +342,29 @@ void driveToGoal() {
                 leftDrive.stop(brake);
                 rightDrive.stop(brake);
 
-                Lever1.setVelocity(50, percent);
-                Lever2.setVelocity(50, percent);
-                Lever1.spin(reverse);
-                Lever2.spin(forward);
-                Intake.spin(reverse);
-                Belt.spin(reverse);
-                wait(5, seconds);
-                Intake.stop();
-                Belt.stop();
-                Lever1.spin(forward);
-                Lever2.spin(reverse);
-                wait(5, seconds);
-                Lever1.stop();
-                Lever2.stop();
+                if (useLoader) {
+                    // Score on Loader goal using Loader motor
+                    Brain.Screen.setCursor(3, 1);
+                    Brain.Screen.print("SCORING ON LOADER GOAL");
+                    Loader.setVelocity(50, percent);
+                    Loader.spin(forward);
+                    Intake.spin(reverse);
+                    wait(5, seconds);
+                    Intake.stop();
+                    Loader.spin(reverse);
+                    wait(2, seconds);
+                    Loader.stop();
+                } else {
+                    // Score on Long goal using Outake motor
+                    Brain.Screen.setCursor(3, 1);
+                    Brain.Screen.print("SCORING ON LONG GOAL");
+                    Outake.setVelocity(50, percent);
+                    Outake.spin(forward);
+                    Intake.spin(reverse);
+                    wait(5, seconds);
+                    Intake.stop();
+                    Outake.stop();
+                }
             } else {
                 double angle       = atan2(gx, gy) * (180.0 / M_PI);
                 double targetSteer = angle * 0.85;
@@ -386,7 +413,8 @@ int main() {
     this_thread::sleep_for(loop_time);
 
     Intake.setVelocity(30, percent);
-    Belt.setVelocity(30, percent);
+    Outake.setVelocity(30, percent);
+    Loader.setVelocity(30, percent);
     leftDrive.setStopping(coast);
     rightDrive.setStopping(coast);
 
@@ -396,7 +424,6 @@ int main() {
             leftDrive.stop(brake);
             rightDrive.stop(brake);
             Intake.stop();
-            Belt.stop();
             targetTracker.reset();
             Brain.Screen.clearScreen();
             Brain.Screen.setCursor(1, 1);
@@ -473,7 +500,6 @@ int main() {
                 collectingBlock     = true;
                 collectionStartTime = Brain.Timer.system();
                 Intake.spin(forward);
-                Belt.spin(forward);
                 Brain.Screen.setCursor(3, 1);
                 Brain.Screen.print("COLLECTING!");
             } else {
@@ -507,7 +533,6 @@ int main() {
                     firstDetectTime    = 0;
                     blocksCollected++;
                     Intake.stop();
-                    Belt.stop();
                 } else {
                     double angle       = atan2(tx, ty) * (180.0 / M_PI);
                     double targetSteer = angle * 0.85;
@@ -624,7 +649,6 @@ int main() {
                 firstDetectTime    = 0;
                 blocksCollected++;
                 Intake.stop();
-                Belt.stop();
             }
         }
 
