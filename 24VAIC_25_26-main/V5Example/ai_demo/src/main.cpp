@@ -35,14 +35,14 @@ brain Brain;
 controller Controller;
 
 // Drive motors - three per side (motor_group)
-// NOTE: Adjust 'true/false' if robot spins instead of driving straight
-motor leftDrive1  = motor(PORT11, ratio18_1, false);
-motor leftDrive2  = motor(PORT12, ratio18_1, false);
-motor leftDrive3  = motor(PORT13, ratio18_1, false);
+// NOTE: Adjust 'true/false' if robot drives backwards
+motor leftDrive1  = motor(PORT11, ratio18_1, true);   // Reversed
+motor leftDrive2  = motor(PORT12, ratio18_1, true);   // Reversed
+motor leftDrive3  = motor(PORT13, ratio18_1, true);   // Reversed
 
-motor rightDrive1 = motor(PORT14, ratio18_1, true);  // Reversed to match left side
-motor rightDrive2 = motor(PORT15, ratio18_1, true);  // Reversed to match left side
-motor rightDrive3 = motor(PORT16, ratio18_1, true);  // Reversed to match left side
+motor rightDrive1 = motor(PORT14, ratio18_1, false);  // Not reversed
+motor rightDrive2 = motor(PORT15, ratio18_1, false);  // Not reversed
+motor rightDrive3 = motor(PORT16, ratio18_1, false);  // Not reversed
 
 motor_group leftDrive  = motor_group(leftDrive1, leftDrive2, leftDrive3);
 motor_group rightDrive = motor_group(rightDrive1, rightDrive2, rightDrive3);
@@ -119,30 +119,19 @@ int main() {
             double angleToTarget = atan2(ballX, ballY) * (180.0 / M_PI);
             
             if (distance > STOP_DISTANCE) {
-                // Drive toward ball
+                // Drive toward ball - NO STEERING, just straight forward
                 displayInfo("DRIVING TO BALL", local_map.detectionCount, distance);
                 
-                // Simple proportional steering - REDUCED GAIN to prevent spinning
-                double steer = angleToTarget * STEER_GAIN;
+                // Both motors same speed - drive perfectly straight
+                double speed = DRIVE_SPEED;
                 
-                // Ensure both motors drive FORWARD with steering adjustment
-                double leftSpeed = DRIVE_SPEED + steer;
-                double rightSpeed = DRIVE_SPEED - steer;
-                
-                // Clamp speeds to reasonable range (prevent negative = reverse)
-                if (leftSpeed > 100) leftSpeed = 100;
-                if (leftSpeed < 10) leftSpeed = 10;    // Minimum forward speed
-                if (rightSpeed > 100) rightSpeed = 100;
-                if (rightSpeed < 10) rightSpeed = 10;  // Minimum forward speed
-                
-                // Both motors always spin FORWARD
-                leftDrive.setVelocity(leftSpeed, percent);
-                rightDrive.setVelocity(rightSpeed, percent);
+                leftDrive.setVelocity(speed, percent);
+                rightDrive.setVelocity(speed, percent);
                 leftDrive.spin(forward);
                 rightDrive.spin(forward);
                 
-                printf("  -> Angle: %.1f deg, Steer: %.1f, L: %.0f R: %.0f\n", 
-                       angleToTarget, steer, leftSpeed, rightSpeed);
+                printf("  -> Angle: %.1f deg, Dist: %.2fm, Speed: %.0f (NO STEERING)\n", 
+                       angleToTarget, distance, speed);
                 
             } else {
                 // Close enough - STOP!
