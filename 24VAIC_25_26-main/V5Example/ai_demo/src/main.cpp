@@ -54,8 +54,8 @@ int BLOCKS_TO_COLLECT      = 3;             // Blocks needed before going to goa
 #define BASE_DRIVE_SPEED    (DRIVE_SPEED_PCT)        // Normal driving speed
 #define NEAR_DRIVE_SPEED    (DRIVE_SPEED_PCT * 0.80) // Within 1m of target (80%)
 #define COLLECT_DRIVE_SPEED (DRIVE_SPEED_PCT * 0.80) // Driving through block (80%)
-#define SEARCH_SPIN_SPEED   (DRIVE_SPEED_PCT * 0.10) // Rotating to search (80%)
-#define GOAL_APPROACH_SPEED (DRIVE_SPEED_PCT)        // Driving to goal
+#define SEARCH_SPIN_SPEED   5.0                  // Rotating to search (FIXED at 5% for gentle rotation)
+#define GOAL_APPROACH_SPEED (DRIVE_SPEED_PCT)    // Driving to goal
 
 // ===== CAMERA & DETECTION SETTINGS =====
 // Detection confirmation (prevents false positives)
@@ -778,30 +778,23 @@ int main() {
             // Not confirmed — acquiring or lost
             if (!collectingBlock) {
                 if (!rawFound) {
-                    // No detection - rotate to scan
-                    uint32_t now = Brain.Timer.system();
-                    bool rotateRight = ((now / 3000) % 2) == 0;
-
-                    leftDrive.setVelocity(SEARCH_SPIN_SPEED, percent);
-                    rightDrive.setVelocity(SEARCH_SPIN_SPEED, percent);
-                    leftDrive.spin(rotateRight  ? forward : reverse);
-                    rightDrive.spin(rotateRight ? reverse : forward);
+                    // No detection - stop and wait (don't spin violently)
+                    leftDrive.stop(brake);
+                    rightDrive.stop(brake);
 
                     double robotX = GPS.xPosition(distanceUnits::cm);
                     double robotY = GPS.yPosition(distanceUnits::cm);
                     double heading = GPS.heading(degrees);
                     displayStatus("SCAN", 0, robotX, robotY, heading, totalDetections, hits, threshold);
                 } else {
-                    // Target detected - acquiring, drive toward it while building confidence
+                    // Target detected - acquiring, drive straight toward it while building confidence
                     displayStatus("ACQUIRE", dist, 0, 0, 0, totalDetections, hits, threshold);
                     
-                    // IMMEDIATELY start driving toward target even before confirmed
-                    double angle = atan2(tx, ty) * (180.0 / M_PI);
-                    double targetSteer = angle * 0.85;
+                    // Drive straight toward target (no steering since applyDrive ignores it)
                     double baseSpeed = (dist < 1.0)
                         ? NEAR_DRIVE_SPEED + (dist * (BASE_DRIVE_SPEED - NEAR_DRIVE_SPEED))
                         : BASE_DRIVE_SPEED;
-                    applyDrive(baseSpeed * 0.7, targetSteer, avoidSteer);  // 70% speed during acquire
+                    applyDrive(baseSpeed * 0.7, 0, 0);  // 70% speed during acquire, no steering
                 }
             } else if ((Brain.Timer.system() - collectionStartTime) >=
                            (uint32_t)(COLLECTION_TIME * 1000)) {
